@@ -43,8 +43,11 @@ variables:
   # Must be >= the go line in go.mod (GOTOOLCHAIN=local in the image).
   BASE_GO_VERSION: "1.2.0"
   # -coverpkg: coverage across packages (cmd/pfapid tests exercise
-  # internal/pki), which is what SonarQube reads from coverage.out.
-  GO_TEST_FLAGS: "-race -coverprofile=coverage.out -covermode=atomic -coverpkg=./..."
+  # internal/pki), which is what SonarQube reads from coverage.out. By module
+  # path, not ./...: the job's GOPATH (.go/) is inside the checkout, and
+  # ./... would pull golang.org/x/sys into the profile and break the
+  # cobertura conversion.
+  GO_TEST_FLAGS: "-race -coverprofile=coverage.out -covermode=atomic -coverpkg=github.com/pderuiter/pfapid/..."
   # Release (same Vault role, signing key and GitHub token as the pderuiter
   # Terraform providers). Its own variable: the wbyc group variable
   # VAULT_AUTH_ROLE would override a YAML VAULT_AUTH_ROLE.
