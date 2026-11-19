@@ -35,12 +35,13 @@ release has a `pfapid_<version>_SHA256SUMS` file with a detached GPG signature b
 ([scripts/release-signing-key.asc](scripts/release-signing-key.asc)).
 
 ```sh
-# on a workstation with gpg
-v=0.1.0
+# on a workstation with gpg; v = the latest release
+v=$(curl -s https://api.github.com/repos/pderuiter/pfapid/releases/latest |
+	sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
 base=https://github.com/pderuiter/pfapid/releases/download/v$v
 curl -sSLO $base/pfapid_${v}_openbsd_amd64.tar.gz
 curl -sSLO $base/pfapid_${v}_SHA256SUMS -O $base/pfapid_${v}_SHA256SUMS.sig
-gpg --import scripts/release-signing-key.asc
+curl -sSL https://raw.githubusercontent.com/pderuiter/pfapid/main/scripts/release-signing-key.asc | gpg --import
 gpg --verify pfapid_${v}_SHA256SUMS.sig pfapid_${v}_SHA256SUMS
 shasum -a 256 --ignore-missing -c pfapid_${v}_SHA256SUMS
 ```
