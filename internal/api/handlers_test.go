@@ -99,12 +99,37 @@ func decodeJSON(t *testing.T, body string, v any) {
 	}
 }
 
+// wantStatus fails the test when resp does not carry the expected status.
+func wantStatus(t *testing.T, resp *http.Response, code int, what string) {
+	t.Helper()
+	if resp.StatusCode != code {
+		t.Fatalf("%s: status %d, want %d", what, resp.StatusCode, code)
+	}
+}
+
 func TestAnchorHandlers(t *testing.T) {
 	f := &fake{}
 	p, url := start(t, f, handlerClients)
 	c := client(p, "tf-prod")
 
-	// Delete: 202, Location, precondition forwarded.
+	anchorDelete(t, c, url, f)
+	anchorValidate(t, c, url)
+	resp := anchorDrift(t, c, url)
+
+	// Security headers on every response.
+	if resp.Header.Get("Cache-Control") != "no-store" || resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("headers: %v", resp.Header)
+	}
+	want := []string{"DeleteAnchor:k8s-prod", "ValidateAnchor:k8s-prod", "DriftAnchor:k8s-prod"}
+	if strings.Join(f.calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("backend calls: %v", f.calls)
+	}
+}
+
+// anchorDelete: 202, Location, precondition forwarded; out of scope never
+// reaches the backend.
+func anchorDelete(t *testing.T, c *http.Client, url string, f *fake) {
+	t.Helper()
 	resp, body := do(t, c, "DELETE", url+"/v1/anchors/k8s-prod", "", map[string]string{"If-Match": ` "e1" `})
 	if resp.StatusCode != http.StatusAccepted || resp.Header.Get("Location") != "/v1/changes/00000000000000bb" {
 		t.Fatalf("delete: %d %v %s", resp.StatusCode, resp.Header, body)
@@ -117,44 +142,36 @@ func TestAnchorHandlers(t *testing.T) {
 	if ci.Op != "delete" || ci.Actor != "tf-prod" {
 		t.Fatalf("change info: %+v", ci)
 	}
-	// Delete out of scope never reaches the backend.
-	if resp, _ := do(t, c, "DELETE", url+"/v1/anchors/other", "", nil); resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("delete out of scope: %d", resp.StatusCode)
-	}
+	resp, _ = do(t, c, "DELETE", url+"/v1/anchors/other", "", nil)
+	wantStatus(t, resp, http.StatusForbidden, "delete out of scope")
+}
 
-	// Validate returns the rendered and normalised rules.
-	resp, body = do(t, c, "POST", url+"/v1/anchors/k8s-prod/validate", ruleBody, nil)
+// anchorValidate returns the rendered and normalised rules.
+func anchorValidate(t *testing.T, c *http.Client, url string) {
+	t.Helper()
+	resp, body := do(t, c, "POST", url+"/v1/anchors/k8s-prod/validate", ruleBody, nil)
 	var vr priv.ValidateResult
 	decodeJSON(t, body, &vr)
 	if resp.StatusCode != http.StatusOK || len(vr.Rendered) != 1 || vr.Normalised[0] != "pass in all" {
 		t.Fatalf("validate: %d %s", resp.StatusCode, body)
 	}
-	if resp, _ := do(t, c, "POST", url+"/v1/anchors/k8s-prod/validate", `{"bogus":1}`, nil); resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("validate bad body: %d", resp.StatusCode)
-	}
-	if resp, _ := do(t, c, "POST", url+"/v1/anchors/BAD/validate", ruleBody, nil); resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("validate bad name: %d", resp.StatusCode)
-	}
+	resp, _ = do(t, c, "POST", url+"/v1/anchors/k8s-prod/validate", `{"bogus":1}`, nil)
+	wantStatus(t, resp, http.StatusBadRequest, "validate bad body")
+	resp, _ = do(t, c, "POST", url+"/v1/anchors/BAD/validate", ruleBody, nil)
+	wantStatus(t, resp, http.StatusBadRequest, "validate bad name")
+}
 
-	// Drift.
-	resp, body = do(t, c, "GET", url+"/v1/anchors/k8s-prod/drift", "", nil)
+func anchorDrift(t *testing.T, c *http.Client, url string) *http.Response {
+	t.Helper()
+	resp, body := do(t, c, "GET", url+"/v1/anchors/k8s-prod/drift", "", nil)
 	var dr priv.DriftResult
 	decodeJSON(t, body, &dr)
 	if resp.StatusCode != http.StatusOK || !dr.InSync {
 		t.Fatalf("drift: %d %s", resp.StatusCode, body)
 	}
-	if resp, _ := do(t, c, "GET", url+"/v1/anchors/other/drift", "", nil); resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("drift out of scope: %d", resp.StatusCode)
-	}
-
-	// Security headers on every response.
-	if resp.Header.Get("Cache-Control") != "no-store" || resp.Header.Get("X-Content-Type-Options") != "nosniff" {
-		t.Fatalf("headers: %v", resp.Header)
-	}
-	want := []string{"DeleteAnchor:k8s-prod", "ValidateAnchor:k8s-prod", "DriftAnchor:k8s-prod"}
-	if strings.Join(f.calls, ",") != strings.Join(want, ",") {
-		t.Fatalf("backend calls: %v", f.calls)
-	}
+	out, _ := do(t, c, "GET", url+"/v1/anchors/other/drift", "", nil)
+	wantStatus(t, out, http.StatusForbidden, "drift out of scope")
+	return resp
 }
 
 func TestTableHandlers(t *testing.T) {
@@ -162,6 +179,14 @@ func TestTableHandlers(t *testing.T) {
 	p, url := start(t, f, handlerClients)
 	c := client(p, "tf-prod")
 
+	tableRead(t, p, c, url)
+	tablePut(t, c, url, f)
+	tableDrift(t, c, url)
+}
+
+// tableRead: lists are filtered by scope (admin sees all), GET carries the ETag.
+func tableRead(t *testing.T, p *pki, c *http.Client, url string) {
+	t.Helper()
 	_, body := do(t, c, "GET", url+"/v1/tables", "", nil)
 	if !strings.Contains(body, "k8s_nodes") || strings.Contains(body, "secret") {
 		t.Fatalf("table list not filtered: %s", body)
@@ -170,20 +195,21 @@ func TestTableHandlers(t *testing.T) {
 	if !strings.Contains(body, "secret") {
 		t.Fatalf("admin sees every table: %s", body)
 	}
-
 	resp, body := do(t, c, "GET", url+"/v1/tables/k8s_nodes", "", nil)
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("ETag") != `"t1"` {
 		t.Fatalf("get table: %d %v %s", resp.StatusCode, resp.Header, body)
 	}
-	if resp, _ := do(t, c, "GET", url+"/v1/tables/secret", "", nil); resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("table out of scope: %d", resp.StatusCode)
-	}
-	if resp, _ := do(t, c, "GET", url+"/v1/tables/Bad.Name", "", nil); resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("bad table name: %d", resp.StatusCode)
-	}
+	resp, _ = do(t, c, "GET", url+"/v1/tables/secret", "", nil)
+	wantStatus(t, resp, http.StatusForbidden, "table out of scope")
+	resp, _ = do(t, c, "GET", url+"/v1/tables/Bad.Name", "", nil)
+	wantStatus(t, resp, http.StatusBadRequest, "bad table name")
+}
 
-	// PUT: bare addresses become host prefixes, prefixes are kept.
-	resp, body = do(t, c, "PUT", url+"/v1/tables/k8s_nodes",
+// tablePut: bare addresses become host prefixes, prefixes are kept; bad
+// entries never reach the backend.
+func tablePut(t *testing.T, c *http.Client, url string, f *fake) {
+	t.Helper()
+	resp, body := do(t, c, "PUT", url+"/v1/tables/k8s_nodes",
 		`{"entries":["10.0.0.1","2001:db8::1","192.0.2.0/24"]}`, map[string]string{"If-None-Match": "*"})
 	if resp.StatusCode != http.StatusAccepted || resp.Header.Get("Location") != "/v1/changes/00000000000000cc" {
 		t.Fatalf("put table: %d %s", resp.StatusCode, body)
@@ -204,19 +230,20 @@ func TestTableHandlers(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "not-an-ip") || len(f.calls) != n {
 		t.Fatalf("bad entry: %d %s (calls %v)", resp.StatusCode, body, f.calls)
 	}
-	if resp, _ := do(t, c, "PUT", url+"/v1/tables/k8s_nodes", `{"entries":"x"}`, nil); resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("bad body: %d", resp.StatusCode)
-	}
+	resp, _ = do(t, c, "PUT", url+"/v1/tables/k8s_nodes", `{"entries":"x"}`, nil)
+	wantStatus(t, resp, http.StatusBadRequest, "bad body")
+}
 
-	resp, body = do(t, c, "GET", url+"/v1/tables/k8s_nodes/drift", "", nil)
+func tableDrift(t *testing.T, c *http.Client, url string) {
+	t.Helper()
+	resp, body := do(t, c, "GET", url+"/v1/tables/k8s_nodes/drift", "", nil)
 	var dr priv.DriftResult
 	decodeJSON(t, body, &dr)
 	if resp.StatusCode != http.StatusOK || dr.InSync || dr.Live[0] != "10.0.0.1/32" {
 		t.Fatalf("table drift: %d %s", resp.StatusCode, body)
 	}
-	if resp, _ := do(t, c, "GET", url+"/v1/tables/secret/drift", "", nil); resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("drift out of scope: %d", resp.StatusCode)
-	}
+	resp, _ = do(t, c, "GET", url+"/v1/tables/secret/drift", "", nil)
+	wantStatus(t, resp, http.StatusForbidden, "drift out of scope")
 }
 
 func TestQoSHandlers(t *testing.T) {
