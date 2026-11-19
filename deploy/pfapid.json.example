@@ -1,0 +1,38 @@
+{
+  "listen": "192.0.2.1:8443",
+  "user": "_pfapid",
+  "tls": {
+    "cert": "/etc/pfapid/pki/server.crt",
+    "key": "/etc/pfapid/pki/server.key",
+    "client_cas": {
+      "pfapid": "/etc/pfapid/pki/ca.crt",
+      "corp": "/etc/ssl/corp-root.pem"
+    },
+    "reload_interval": "1m"
+  },
+  "confirm_timeout": "60s",
+  "anchor_dir": "/etc/pf.anchors/api",
+  "include_file": "/etc/pf.anchors/api.conf",
+  "base_ruleset": "/etc/pf.conf",
+  "queue_file": "/etc/pf.anchors/api-queues.conf",
+  "qos_file": "/etc/pf.anchors/api-qos.conf",
+  "state_dir": "/var/db/pfapid",
+  "rate_limit": 10,
+  "rate_burst": 40,
+  "policy": {
+    "interfaces": ["frontend", "backend"],
+    "tables": ["k8s_nodes"],
+    "queue_interfaces": ["vio1", "vio2"],
+    "internal_nets": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fd00::/8"],
+    "allow_internal_nat": false,
+    "max_rules": 1000,
+    "max_table_entries": 65536
+  },
+  "clients": [
+    { "name": "tf-k8s-prod", "ca": "pfapid", "anchors": ["k8s-prod"], "tables": ["k8s_nodes"] },
+    { "name": "ci-k8s", "ca": "corp", "spiffe_id": "spiffe://example.net/ci/terraform", "anchors": ["k8s-*"] },
+    { "name": "monitoring", "ca": "pfapid", "read_only": true, "anchors": ["*"], "tables": ["*"] },
+    { "name": "netops", "ca": "pfapid", "qos": true },
+    { "name": "ops-admin", "ca": "pfapid", "admin": true }
+  ]
+}

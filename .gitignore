@@ -1,0 +1,17 @@
+/pfapid
+/dist/
+# CI Go caches (ci-cd-toolkit keeps GOPATH/GOCACHE in the checkout)
+/.go/
+/.go-cache/
+/.cache/
+# Never commit key material (lab certs live outside the repo)
+*.key
+*.pem
+*.crt
+# ...except the public root CA the release jobs use to verify Vault's TLS
+!/scripts/wbyc-root-ca.pem
+# Terraform working files of the lab tests
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup

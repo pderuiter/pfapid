@@ -1,0 +1,54 @@
+# BUILD ONLY: one tar.gz per OpenBSD architecture and a SHA256SUMS file.
+#
+# GoReleaser neither signs nor publishes: build:release in .gitlab-ci.yml runs
+# `goreleaser release --skip=publish` on our runners, then
+#   sign:gpg       adds the detached SHA256SUMS.sig (scripts/release-signing-key.asc)
+#   sign:cosign    adds <file>.sigstore.json bundles (estate cosign key)
+#   publish:nexus  stores the set in Nexus (raw repo software-packages, pfapid/<version>/)
+#   publish:github copies the archives and SHA256SUMS(.sig) from Nexus to the GitHub release.
+version: 2
+
+project_name: pfapid
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - main: ./cmd/pfapid
+    env:
+      - CGO_ENABLED=0
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - "-s -w -X main.version={{ .Version }}"
+    # pfapid drives pfctl and uses pledge/unveil: OpenBSD only.
+    goos:
+      - openbsd
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - docs/CERTIFICATES.md
+      - docs/DESIGN.md
+      - api/openapi.yaml
+      - deploy/rc.d/pfapid
+      - deploy/pfapid.json.example
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"
+  algorithm: sha256
+
+release:
+  disable: true
+
+# Release notes are written by scripts/release-notes.sh.
+changelog:
+  disable: true

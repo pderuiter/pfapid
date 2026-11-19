@@ -1,0 +1,472 @@
+openapi: 3.1.0
+info:
+  title: pfapid
+  version: "1"
+  description: |
+    REST API for OpenBSD pf anchors (`api/*`) and managed tables. See
+    docs/DESIGN.md.
+
+    Authentication: mutual TLS (TLS 1.3). A client is identified by its
+    certificate's CN, or, when configured with a `spiffe_id`, by the
+    certificate's SPIFFE ID (single URI SAN). The certificate must chain to
+    the CA bundle that client is bound to. See docs/CERTIFICATES.md.
+
+    Every mutation (PUT/DELETE) is applied immediately and returns
+    `202 Accepted` with a pending change. The change is rolled back unless
+    `POST /v1/changes/{id}/confirm` is called before `deadline`. Only one
+    change can be pending at a time; others get `409`.
+
+    Concurrency: `GET` returns an `ETag`. Creating an anchor needs
+    `If-None-Match: *`; updating or deleting needs `If-Match: "<etag>"`.
+    Tables always exist, so a table PUT always needs `If-Match`.
+servers:
+  - url: https://{firewall}:8443
+    variables:
+      firewall:
+        default: fw.example
+security:
+  - mtls: []
+paths:
+  /v1/healthz:
+    get:
+      operationId: health
+      responses:
+        "200":
+          description: Authenticated and authorised.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, client]
+                properties:
+                  status: { type: string, const: ok }
+                  client: { type: string }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/anchors:
+    get:
+      operationId: listAnchors
+      description: Committed anchors within the client's scope.
+      responses:
+        "200":
+          description: Anchor names.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [anchors]
+                properties:
+                  anchors: { type: array, items: { $ref: "#/components/schemas/Name" } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/anchors/{name}:
+    parameters: [{ $ref: "#/components/parameters/Name" }]
+    get:
+      operationId: getAnchor
+      responses:
+        "200":
+          description: The committed anchor.
+          headers: { ETag: { $ref: "#/components/headers/ETag" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnchorState" }
+        default: { $ref: "#/components/responses/Error" }
+    put:
+      operationId: putAnchor
+      parameters:
+        - { $ref: "#/components/parameters/IfMatch" }
+        - { $ref: "#/components/parameters/IfNoneMatch" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AnchorBody" }
+      responses:
+        "202": { $ref: "#/components/responses/Pending" }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: deleteAnchor
+      parameters: [{ $ref: "#/components/parameters/IfMatch" }]
+      responses:
+        "202": { $ref: "#/components/responses/Pending" }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/anchors/{name}/validate:
+    parameters: [{ $ref: "#/components/parameters/Name" }]
+    post:
+      operationId: validateAnchor
+      description: Dry run. Validates, renders and runs `pfctl -n`. Changes nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AnchorBody" }
+      responses:
+        "200":
+          description: Accepted by pfctl.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rendered, normalised]
+                properties:
+                  rendered: { type: array, items: { type: string } }
+                  normalised:
+                    description: pfctl's expansion, as `pfctl -sr` will show it.
+                    type: array
+                    items: { type: string }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/anchors/{name}/drift:
+    parameters: [{ $ref: "#/components/parameters/Name" }]
+    get:
+      operationId: driftAnchor
+      responses:
+        "200": { $ref: "#/components/responses/Drift" }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/tables:
+    get:
+      operationId: listTables
+      responses:
+        "200":
+          description: Managed tables within the client's scope.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tables]
+                properties:
+                  tables: { type: array, items: { $ref: "#/components/schemas/Name" } }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/tables/{name}:
+    parameters: [{ $ref: "#/components/parameters/Name" }]
+    get:
+      operationId: getTable
+      responses:
+        "200":
+          description: The committed table contents.
+          headers: { ETag: { $ref: "#/components/headers/ETag" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TableState" }
+        default: { $ref: "#/components/responses/Error" }
+    put:
+      operationId: putTable
+      description: Replaces the table's contents.
+      parameters: [{ $ref: "#/components/parameters/IfMatch" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [entries]
+              properties:
+                entries:
+                  description: Addresses or prefixes, IPv4 and IPv6 mixed. A bare address is a host prefix.
+                  type: array
+                  items: { type: string }
+      responses:
+        "202": { $ref: "#/components/responses/Pending" }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/tables/{name}/drift:
+    parameters: [{ $ref: "#/components/parameters/Name" }]
+    get:
+      operationId: driftTable
+      responses:
+        "200": { $ref: "#/components/responses/Drift" }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/qos:
+    get:
+      operationId: getQoS
+      description: |
+        The firewall-wide QoS document: HFSC queue trees and the match rules
+        that classify traffic into them. Needs the client's `qos` grant (or
+        admin). Empty until first set.
+      responses:
+        "200":
+          description: The committed QoS document.
+          headers: { ETag: { $ref: "#/components/headers/ETag" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QoSState" }
+        default: { $ref: "#/components/responses/Error" }
+    put:
+      operationId: putQoS
+      description: |
+        Replaces the whole document and reloads the base ruleset (queues only
+        exist in the main ruleset). Always needs `If-Match`.
+      parameters: [{ $ref: "#/components/parameters/IfMatch" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QoS" }
+      responses:
+        "202": { $ref: "#/components/responses/Pending" }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/qos/validate:
+    post:
+      operationId: validateQoS
+      description: Dry run against the real base ruleset (`pfctl -n`). Changes nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QoS" }
+      responses:
+        "200":
+          description: Accepted by pfctl.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rendered, normalised]
+                properties:
+                  rendered: { type: array, items: { type: string } }
+                  normalised:
+                    description: Queue definitions and rules as `pfctl -s queue` / `-a api-qos -sr` will show them.
+                    type: array
+                    items: { type: string }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/qos/drift:
+    get:
+      operationId: driftQoS
+      responses:
+        "200": { $ref: "#/components/responses/Drift" }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/changes/pending:
+    get:
+      operationId: pendingChange
+      responses:
+        "200":
+          description: The pending change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Change" }
+        "204": { description: Nothing pending. }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/changes/{id}/confirm:
+    parameters: [{ $ref: "#/components/parameters/ChangeID" }]
+    post:
+      operationId: confirmChange
+      description: Commits the change. Only the client that made it, or an admin.
+      responses:
+        "204": { description: Committed. }
+        default: { $ref: "#/components/responses/Error" }
+  /v1/changes/{id}/rollback:
+    parameters: [{ $ref: "#/components/parameters/ChangeID" }]
+    post:
+      operationId: rollbackChange
+      responses:
+        "204": { description: Reverted. }
+        default: { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    mtls:
+      type: mutualTLS
+  headers:
+    ETag:
+      schema: { type: string, example: '"d6b2df71244d0b6630b78eba928a6e1c"' }
+  parameters:
+    Name:
+      name: name
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/Name" }
+    ChangeID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[0-9a-f]{16}$" }
+    IfMatch:
+      name: If-Match
+      in: header
+      schema: { type: string }
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      schema: { type: string, const: "*" }
+  responses:
+    Pending:
+      description: Applied, awaiting confirmation.
+      headers:
+        Location: { schema: { type: string, example: /v1/changes/5ec9cd8d83fca294 } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Change" }
+    Drift:
+      description: Desired (pfctl -nv) versus loaded (pfctl -s) state, normalised.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [in_sync, expected, live]
+            properties:
+              in_sync: { type: boolean }
+              expected: { type: [array, "null"], items: { type: string } }
+              live: { type: [array, "null"], items: { type: string } }
+    Error:
+      description: |
+        400 invalid, 403 forbidden, 404 not_found, 409 conflict (a change is
+        pending), 412 precondition (ETag), 422 pf_rejected (pfctl refused),
+        429 rate_limited (see Retry-After), 500 internal.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: object
+                required: [code, message]
+                properties:
+                  code:
+                    type: string
+                    enum: [invalid, forbidden, not_found, conflict, precondition, pf_rejected, rate_limited, internal]
+                  message: { type: string }
+  schemas:
+    Name:
+      type: string
+      pattern: "^[a-z][a-z0-9_-]{0,30}$"
+    Prefix:
+      description: Canonical CIDR (no host bits), e.g. 10.0.0.0/8 or 2001:db8::/32.
+      type: string
+    PortRange:
+      type: object
+      additionalProperties: false
+      required: [from]
+      properties:
+        from: { type: integer, minimum: 1, maximum: 65535 }
+        to: { type: integer, minimum: 1, maximum: 65535, description: "Range end (inclusive); omit for a single port." }
+    Endpoint:
+      description: At most one of prefixes, table, interface. None means any.
+      type: object
+      additionalProperties: false
+      properties:
+        prefixes: { type: array, items: { $ref: "#/components/schemas/Prefix" } }
+        table: { $ref: "#/components/schemas/Name" }
+        interface: { type: string, description: "The interface's own addresses: (name)." }
+        ports: { type: array, items: { $ref: "#/components/schemas/PortRange" } }
+    NAT:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [nat-to, rdr-to, binat-to, af-to] }
+        address: { $ref: "#/components/schemas/Prefix" }
+        interface: { type: string, description: "nat-to (iface:0) instead of an address." }
+        port: { $ref: "#/components/schemas/PortRange" }
+        to_family: { type: string, enum: [inet, inet6], description: af-to only. }
+        af_from: { $ref: "#/components/schemas/Prefix" }
+        af_to: { $ref: "#/components/schemas/Prefix" }
+    Rule:
+      type: object
+      additionalProperties: false
+      required: [action, interface, family, from, to]
+      properties:
+        action: { type: string, enum: [pass, block, match] }
+        direction: { type: string, enum: [in, out, ""], description: Empty means both. }
+        quick: { type: boolean }
+        log: { type: boolean }
+        block_return: { type: boolean }
+        interface: { type: string, description: "Interface or group from the firewall policy; never mgmt." }
+        family: { type: string, enum: [inet, inet6] }
+        protocol: { type: string, enum: ["", tcp, udp, icmp, icmp6] }
+        from: { $ref: "#/components/schemas/Endpoint" }
+        to: { $ref: "#/components/schemas/Endpoint" }
+        nat: { $ref: "#/components/schemas/NAT" }
+        prio:
+          type: object
+          additionalProperties: false
+          required: [normal]
+          properties:
+            normal: { type: integer, minimum: 0, maximum: 7 }
+            low: { type: integer, minimum: 0, maximum: 7 }
+        queue:
+          description: "`set queue`. Only allowed in the QoS document."
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name: { $ref: "#/components/schemas/Name" }
+            priority: { $ref: "#/components/schemas/Name", description: Queue for low-delay and TCP ACK packets. }
+        label: { type: string, pattern: "^[A-Za-z0-9 _.:/-]{0,63}$" }
+    Bandwidth:
+      description: Bit rate with an optional K, M or G suffix. No percentages.
+      type: string
+      pattern: "^[1-9][0-9]{0,11}[KMG]?$"
+    Queue:
+      description: |
+        An HFSC queue. Root queues set `interface` (a physical interface from
+        policy.queue_interfaces); others set `parent`, defined earlier in the
+        list. Each tree has exactly one default leaf. Children may not add up
+        to more than their parent's bandwidth.
+      type: object
+      additionalProperties: false
+      required: [name, bandwidth]
+      properties:
+        name: { $ref: "#/components/schemas/Name" }
+        interface: { type: string }
+        parent: { $ref: "#/components/schemas/Name" }
+        bandwidth: { $ref: "#/components/schemas/Bandwidth" }
+        min: { $ref: "#/components/schemas/Bandwidth" }
+        max: { $ref: "#/components/schemas/Bandwidth" }
+        qlimit: { type: integer, minimum: 1, maximum: 65535 }
+        default: { type: boolean }
+        flows: { type: integer, minimum: 1, maximum: 32767, description: FQ-CoDel flow queue (leaf only). }
+        quantum: { type: integer, minimum: 1, maximum: 65535, description: Bytes; flow queues only. }
+    QoS:
+      type: object
+      additionalProperties: false
+      properties:
+        queues: { type: array, items: { $ref: "#/components/schemas/Queue" } }
+        rules:
+          description: Classification only; every rule has action `match` and sets queue and/or prio.
+          type: array
+          items: { $ref: "#/components/schemas/Rule" }
+    QoSState:
+      type: object
+      required: [qos, etag]
+      properties:
+        qos: { $ref: "#/components/schemas/QoS" }
+        etag: { type: string }
+        pending_change: { type: string }
+    AnchorBody:
+      type: object
+      additionalProperties: false
+      required: [rules]
+      properties:
+        rules: { type: array, items: { $ref: "#/components/schemas/Rule" } }
+    AnchorState:
+      type: object
+      required: [anchor, etag]
+      properties:
+        anchor:
+          type: object
+          required: [name, rules]
+          properties:
+            name: { $ref: "#/components/schemas/Name" }
+            rules: { type: [array, "null"], items: { $ref: "#/components/schemas/Rule" } }
+        etag: { type: string }
+        pending_change: { type: string }
+    TableState:
+      type: object
+      required: [table, etag]
+      properties:
+        table:
+          type: object
+          required: [name, entries]
+          properties:
+            name: { $ref: "#/components/schemas/Name" }
+            entries: { type: [array, "null"], items: { $ref: "#/components/schemas/Prefix" } }
+        etag: { type: string }
+        pending_change: { type: string }
+    Change:
+      type: object
+      required: [id, actor, kind, name, op, deadline]
+      properties:
+        id: { type: string, pattern: "^[0-9a-f]{16}$" }
+        actor: { type: string }
+        kind: { type: string, enum: [anchor, table, qos] }
+        name: { $ref: "#/components/schemas/Name" }
+        op: { type: string, enum: [put, delete] }
+        deadline: { type: string, format: date-time }
+        etag: { type: string, description: ETag the object will have once confirmed. }

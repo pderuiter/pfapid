@@ -1,0 +1,19 @@
+#!/bin/ksh
+#
+# rc.d(8) script for pfapid. pfapid does not daemonise; rc_bg runs it in the
+# background and daemon_logger sends its stderr to syslog.
+
+daemon="/usr/local/sbin/pfapid"
+daemon_flags="-f /etc/pfapid.json"
+daemon_logger="daemon.info"
+
+. /etc/rc.d/rc.subr
+
+rc_bg=YES
+rc_reload=NO
+
+rc_pre() {
+	${daemon} ${daemon_flags} -n
+}
+
+rc_cmd $1
