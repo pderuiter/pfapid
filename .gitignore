@@ -4,6 +4,13 @@
 /.go/
 /.go-cache/
 /.cache/
+# Test and scan reports (CI artifacts that later jobs download into the
+# checkout; GoReleaser refuses a dirty tree)
+coverage.*
+test-output.txt
+*-report.json
+govulncheck.json
+gl-code-quality-report.json
 # Never commit key material (lab certs live outside the repo)
 *.key
 *.pem
