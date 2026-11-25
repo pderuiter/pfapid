@@ -100,6 +100,8 @@ Example configuration: [deploy/pfapid.json.example](deploy/pfapid.json.example).
 
 ```pf
 table <k8s_nodes> persist          # managed tables: declared EMPTY + persist
+table <rfc1918> const { 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 }
+                                   # policy.ref_tables: rules may name it, pfapid never fills it
 pass in quick on mgmt ...          # management before the anchors
 # QoS (only if policy.queue_interfaces is set): pfapid writes both files
 # and applies a QoS change by reloading this file.

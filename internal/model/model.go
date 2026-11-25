@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -65,12 +66,17 @@ type PortRange struct {
 	To   uint16 `json:"to,omitempty"`
 }
 
-// Endpoint is one side of a rule. At most one of Prefixes, Table and
-// Interface is set; none means "any".
+// Endpoint is one side of a rule. At most one of Prefixes, Table, Interface
+// and Self is set; none means "any". Negate (`!`) inverts the address and
+// needs exactly one of them; with Prefixes it needs exactly one prefix,
+// because pfctl expands `{ !a !b }` into one rule per element, and a pass
+// rule per negated element matches nearly everything.
 type Endpoint struct {
+	Negate    bool           `json:"negate,omitempty"`
 	Prefixes  []netip.Prefix `json:"prefixes,omitempty"`
 	Table     string         `json:"table,omitempty"`
 	Interface string         `json:"interface,omitempty"` // the interface's own addresses: (name)
+	Self      bool           `json:"self,omitempty"`      // every address of the firewall: self
 	Ports     []PortRange    `json:"ports,omitempty"`
 }
 
@@ -107,6 +113,10 @@ type Rule struct {
 	To          Endpoint  `json:"to"`
 	NAT         *NAT      `json:"nat,omitempty"`
 	Prio        *Prio     `json:"prio,omitempty"`
+	// ICMPTypes (`icmp-type` / `icmp6-type`): pf type names for the rule's
+	// protocol (see icmpTypes, icmp6Types) or numbers 0..255. Protocol icmp
+	// or icmp6 only.
+	ICMPTypes []string `json:"icmp_types,omitempty"`
 	// Queue (`set queue`) is only valid in the QoS document (M0 T1b).
 	Queue *QueueSet `json:"queue,omitempty"`
 	Label string    `json:"label,omitempty"`
@@ -135,6 +145,9 @@ type Policy struct {
 	// Global tables (declared in the base ruleset) whose contents the API
 	// manages and which rules may reference.
 	Tables []string `json:"tables"`
+	// Global tables the base ruleset owns (typically `const`) that rules may
+	// reference but whose contents the API never reads or changes.
+	RefTables []string `json:"ref_tables,omitempty"`
 	// Internal networks: NAT between two internal networks is refused unless
 	// AllowInternalNAT (decision 2026-11-19: no NAT for internal traffic).
 	InternalNets     []netip.Prefix `json:"internal_nets"`
@@ -206,27 +219,44 @@ func (pr PortRange) validate(what string) error {
 	return nil
 }
 
+// addresses counts the address kinds set (prefixes, table, interface, self).
+func (e Endpoint) addresses() int {
+	n := 0
+	for _, set := range []bool{len(e.Prefixes) > 0, e.Table != "", e.Interface != "", e.Self} {
+		if set {
+			n++
+		}
+	}
+	return n
+}
+
+// validateAddress checks the address part: one kind at most, and negation
+// only of a single address.
+func (e Endpoint) validateAddress(what string) error {
+	n := e.addresses()
+	if n > 1 {
+		return invalid("%s: use only one of prefixes, table, interface, self", what)
+	}
+	if e.Negate && n == 0 {
+		return invalid("%s: negate needs an address (prefixes, table, interface or self)", what)
+	}
+	if e.Negate && len(e.Prefixes) > 1 {
+		return invalid("%s: negate takes exactly one prefix (pf expands a negated list into rules that match almost everything); use a table", what)
+	}
+	return nil
+}
+
 func (e Endpoint) validate(what string, fam Family, proto Protocol, pol Policy) error {
-	set := 0
-	if len(e.Prefixes) > 0 {
-		set++
-	}
-	if e.Table != "" {
-		set++
-	}
-	if e.Interface != "" {
-		set++
-	}
-	if set > 1 {
-		return invalid("%s: use only one of prefixes, table, interface", what)
+	if err := e.validateAddress(what); err != nil {
+		return err
 	}
 	for _, p := range e.Prefixes {
 		if err := checkPrefix(p, fam, what); err != nil {
 			return err
 		}
 	}
-	if e.Table != "" && !contains(pol.Tables, e.Table) {
-		return invalid("%s: table %q is not a managed table", what, e.Table)
+	if e.Table != "" && !contains(pol.Tables, e.Table) && !contains(pol.RefTables, e.Table) {
+		return invalid("%s: table %q is not a managed or referenced table", what, e.Table)
 	}
 	if e.Interface != "" && !contains(pol.Interfaces, e.Interface) {
 		return invalid("%s: interface %q is not allowed", what, e.Interface)
@@ -243,9 +273,10 @@ func (e Endpoint) validate(what string, fam Family, proto Protocol, pol Policy) 
 }
 
 // insideAll reports whether every prefix lies inside one of nets. An
-// endpoint that is "any", a table or an interface is not provably internal.
+// endpoint that is "any", negated, a table, an interface or self is not
+// provably internal.
 func insideAll(e Endpoint, nets []netip.Prefix) bool {
-	if len(e.Prefixes) == 0 {
+	if len(e.Prefixes) == 0 || e.Negate {
 		return false
 	}
 	for _, p := range e.Prefixes {
@@ -320,7 +351,7 @@ func (n NAT) validateBinat(r Rule) error {
 		return nil
 	}
 	// pfctl accepts mismatched prefix lengths (M0 T10c); we do not.
-	if n.Address == nil || len(r.From.Prefixes) != 1 {
+	if n.Address == nil || len(r.From.Prefixes) != 1 || r.From.Negate {
 		return invalid("binat-to: needs exactly one source prefix and a target address")
 	}
 	if r.From.Prefixes[0].Bits() != n.Address.Bits() {
@@ -379,6 +410,9 @@ func (r Rule) Validate(pol Policy) error {
 	if err := r.validatePrio(); err != nil {
 		return err
 	}
+	if err := r.validateICMPTypes(); err != nil {
+		return err
+	}
 	if r.Queue != nil {
 		return invalid("queue: set queue is only allowed in the QoS document (/v1/qos); use prio here")
 	}
@@ -422,6 +456,62 @@ func (r Rule) validateProtocol() error {
 		}
 	default:
 		return invalid("protocol %q", r.Protocol)
+	}
+	return nil
+}
+
+// pf's ICMP type names (pf.conf(5), pfctl_parser.c icmp_type /
+// icmp6_type).
+var (
+	icmpTypes = []string{
+		"echorep", "unreach", "squench", "redir", "althost", "echoreq", "routeradv", "routersol",
+		"timex", "paramprob", "timereq", "timerep", "inforeq", "inforep", "maskreq", "maskrep",
+		"trace", "dataconv", "mobredir", "ipv6-where", "ipv6-here", "mobregreq", "mobregrep",
+		"skip", "photuris",
+	}
+	icmp6Types = []string{
+		"unreach", "toobig", "timex", "paramprob", "echoreq", "echorep", "groupqry", "grouprep",
+		"groupterm", "listqry", "listenrep", "listendone", "routersol", "routeradv", "neighbrsol",
+		"neighbradv", "redir", "routrrenum", "wrureq", "wrurep", "fqdnreq", "fqdnrep", "niqry",
+		"nirep", "mtraceresp", "mtrace",
+	}
+	icmpNumRe = regexp.MustCompile(`^(0|[1-9][0-9]{0,2})$`)
+)
+
+// validICMPType reports whether t is one of names or a number 0..255.
+func validICMPType(t string, names []string) bool {
+	if contains(names, t) {
+		return true
+	}
+	if !icmpNumRe.MatchString(t) {
+		return false
+	}
+	n, err := strconv.Atoi(t)
+	return err == nil && n <= 255
+}
+
+func (r Rule) validateICMPTypes() error {
+	if len(r.ICMPTypes) == 0 {
+		return nil
+	}
+	var names []string
+	switch r.Protocol {
+	case ICMP:
+		names = icmpTypes
+	case ICMP6:
+		names = icmp6Types
+	default:
+		return invalid("icmp_types need protocol icmp or icmp6")
+	}
+	seen := make(map[string]bool, len(r.ICMPTypes))
+	for _, t := range r.ICMPTypes {
+		if !validICMPType(t, names) {
+			return invalid("icmp_types: %q is not an %s type name or a number 0..255", t, r.Protocol)
+		}
+		if seen[t] {
+			return invalid("icmp_types: duplicate %q", t)
+		}
+		seen[t] = true
 	}
 	return nil
 }
@@ -501,6 +591,14 @@ func (p Policy) Validate() error {
 	for _, n := range p.Tables {
 		if !ValidName(n) {
 			errs = append(errs, fmt.Sprintf("table %q", n))
+		}
+	}
+	for _, n := range p.RefTables {
+		if !ValidName(n) {
+			errs = append(errs, fmt.Sprintf("ref table %q", n))
+		}
+		if contains(p.Tables, n) {
+			errs = append(errs, fmt.Sprintf("table %q is both managed and referenced", n))
 		}
 	}
 	for _, n := range p.InternalNets {

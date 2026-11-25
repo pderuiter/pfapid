@@ -40,9 +40,23 @@ func ports(prs []model.PortRange) string {
 	return " port { " + strings.Join(parts, " ") + " }"
 }
 
+// icmpTypes renders ` icmp-type x` / ` icmp6-type { x y }`.
+func icmpTypes(r model.Rule) string {
+	kw := " icmp-type "
+	if r.Protocol == model.ICMP6 {
+		kw = " icmp6-type "
+	}
+	if len(r.ICMPTypes) == 1 {
+		return kw + r.ICMPTypes[0]
+	}
+	return kw + "{ " + strings.Join(r.ICMPTypes, " ") + " }"
+}
+
 func endpoint(e model.Endpoint) string {
 	var s string
 	switch {
+	case e.Self:
+		s = "self"
 	case len(e.Prefixes) == 1:
 		s = e.Prefixes[0].String()
 	case len(e.Prefixes) > 1:
@@ -57,6 +71,9 @@ func endpoint(e model.Endpoint) string {
 		s = "(" + e.Interface + ")"
 	default:
 		s = "any"
+	}
+	if e.Negate {
+		s = "! " + s
 	}
 	if len(e.Ports) > 0 {
 		s += ports(e.Ports)
@@ -112,6 +129,9 @@ func Rule(r model.Rule) string {
 	}
 	b.WriteString(" from " + endpoint(r.From))
 	b.WriteString(" to " + endpoint(r.To))
+	if len(r.ICMPTypes) > 0 {
+		b.WriteString(icmpTypes(r))
+	}
 	if r.NAT != nil {
 		b.WriteString(nat(*r.NAT))
 	}

@@ -337,13 +337,21 @@ components:
         from: { type: integer, minimum: 1, maximum: 65535 }
         to: { type: integer, minimum: 1, maximum: 65535, description: "Range end (inclusive); omit for a single port." }
     Endpoint:
-      description: At most one of prefixes, table, interface. None means any.
+      description: |
+        At most one of prefixes, table, interface and self. None means any.
+        `negate` inverts the address (`! <x>` in pf) and needs exactly one
+        address: one prefix, a table, an interface or self. A negated list is
+        refused, because pf expands `{ !a !b }` into one rule per element.
       type: object
       additionalProperties: false
       properties:
+        negate: { type: boolean, description: "`!` in front of the address." }
         prefixes: { type: array, items: { $ref: "#/components/schemas/Prefix" } }
-        table: { $ref: "#/components/schemas/Name" }
+        table:
+          $ref: "#/components/schemas/Name"
+          description: A table from policy.tables (managed) or policy.ref_tables (owned by the base ruleset, read-only).
         interface: { type: string, description: "The interface's own addresses: (name)." }
+        self: { type: boolean, description: "Every address of the firewall: self." }
         ports: { type: array, items: { $ref: "#/components/schemas/PortRange" } }
     NAT:
       type: object
@@ -373,6 +381,12 @@ components:
         from: { $ref: "#/components/schemas/Endpoint" }
         to: { $ref: "#/components/schemas/Endpoint" }
         nat: { $ref: "#/components/schemas/NAT" }
+        icmp_types:
+          description: |
+            `icmp-type` (protocol icmp) or `icmp6-type` (protocol icmp6): pf type
+            names such as echoreq, unreach, toobig, neighbrsol, or numbers 0..255.
+          type: array
+          items: { type: string, pattern: "^([a-z][a-z0-9-]{0,15}|0|[1-9][0-9]{0,2})$" }
         prio:
           type: object
           additionalProperties: false
