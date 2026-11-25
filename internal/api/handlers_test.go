@@ -90,6 +90,7 @@ var handlerClients = []Client{
 	{Name: "reader", ReadOnly: true, Anchors: []string{"*"}, Tables: []string{"*"}},
 	{Name: "admin", Admin: true},
 	{Name: "netops", QoS: true},
+	{Name: "planner", ReadOnly: true, Anchors: []string{"k8s-*"}},
 }
 
 func decodeJSON(t *testing.T, body string, v any) {
@@ -423,5 +424,33 @@ func TestRateLimitedRequest(t *testing.T) {
 	resp, _ := do(t, c, "GET", ts.URL+"/v1/healthz", "", nil)
 	if resp.StatusCode != http.StatusTooManyRequests || resp.Header.Get("Retry-After") != "1" {
 		t.Fatalf("second request: %d %v", resp.StatusCode, resp.Header)
+	}
+}
+
+// A read-only client may validate (a POST that changes nothing), so a
+// plan-only identity can run terraform plan; it still cannot write, and its
+// anchor scope still applies.
+func TestReadOnlyMayValidate(t *testing.T) {
+	f := &fake{}
+	p, url := start(t, f, handlerClients)
+	c := client(p, "planner")
+
+	anchorValidate(t, c, url)
+	resp, _ := do(t, c, "POST", url+"/v1/anchors/other/validate", ruleBody, nil)
+	wantStatus(t, resp, http.StatusForbidden, "read-only validate out of scope")
+	resp, _ = do(t, c, "PUT", url+"/v1/anchors/k8s-prod", ruleBody, map[string]string{"If-None-Match": "*"})
+	wantStatus(t, resp, http.StatusForbidden, "read-only put")
+	resp, _ = do(t, c, "DELETE", url+"/v1/anchors/k8s-prod", "", map[string]string{"If-Match": `"x"`})
+	wantStatus(t, resp, http.StatusForbidden, "read-only delete")
+	resp, _ = do(t, c, "POST", url+"/v1/changes/00000000000000aa/confirm", "", nil)
+	wantStatus(t, resp, http.StatusForbidden, "read-only confirm")
+	// QoS validation is read-safe too, but still needs the qos grant.
+	resp, _ = do(t, c, "POST", url+"/v1/qos/validate", `{}`, nil)
+	wantStatus(t, resp, http.StatusForbidden, "read-only qos validate without grant")
+
+	for _, call := range f.calls {
+		if !strings.HasPrefix(call, "ValidateAnchor:") {
+			t.Fatalf("read-only client reached the backend with %q", call)
+		}
 	}
 }

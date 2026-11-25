@@ -181,13 +181,17 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request, c Client)
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	route := func(pattern string, h handlerFunc) { mux.Handle(pattern, s.wrap(h)) }
+	route := func(pattern string, h handlerFunc) { mux.Handle(pattern, s.wrap(h, false)) }
+	// check is a POST that changes nothing: it renders and runs pfctl -n.
+	// Read-only clients may call it, so a plan-only identity (e.g. merge
+	// request pipelines) can run terraform plan, which validates new rules.
+	check := func(pattern string, h handlerFunc) { mux.Handle(pattern, s.wrap(h, true)) }
 	route("GET /v1/healthz", s.health)
 	route("GET /v1/anchors", s.listAnchors)
 	route("GET /v1/anchors/{name}", s.getAnchor)
 	route("PUT /v1/anchors/{name}", s.putAnchor)
 	route("DELETE /v1/anchors/{name}", s.deleteAnchor)
-	route("POST /v1/anchors/{name}/validate", s.validateAnchor)
+	check("POST /v1/anchors/{name}/validate", s.validateAnchor)
 	route("GET /v1/anchors/{name}/drift", s.driftAnchor)
 	route("GET /v1/tables", s.listTables)
 	route("GET /v1/tables/{name}", s.getTable)
@@ -195,7 +199,7 @@ func (s *Server) Handler() http.Handler {
 	route("GET /v1/tables/{name}/drift", s.driftTable)
 	route("GET /v1/qos", s.getQoS)
 	route("PUT /v1/qos", s.putQoS)
-	route("POST /v1/qos/validate", s.validateQoS)
+	check("POST /v1/qos/validate", s.validateQoS)
 	route("GET /v1/qos/drift", s.driftQoS)
 	route("GET /v1/changes/pending", s.pending)
 	route("POST /v1/changes/{id}/confirm", s.confirm)
@@ -235,7 +239,10 @@ type statusWriter struct {
 
 func (w *statusWriter) WriteHeader(c int) { w.status = c; w.ResponseWriter.WriteHeader(c) }
 
-func (s *Server) wrap(h handlerFunc) http.Handler {
+// wrap authenticates, rate-limits and logs every request. readSafe marks a
+// route that changes no state although it is not a GET (the validate
+// endpoints); read-only clients may call those.
+func (s *Server) wrap(h handlerFunc, readSafe bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -260,7 +267,7 @@ func (s *Server) wrap(h handlerFunc) http.Handler {
 			writeErr(sw, http.StatusTooManyRequests, "rate_limited", "too many requests")
 			return
 		}
-		if c.ReadOnly && r.Method != http.MethodGet {
+		if c.ReadOnly && r.Method != http.MethodGet && !readSafe {
 			writeErr(sw, http.StatusForbidden, priv.CodeForbidden, "client is read-only")
 			return
 		}
