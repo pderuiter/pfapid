@@ -109,7 +109,7 @@ func startWith(t *testing.T, b priv.Backend, clients []Client, m Material) (*Ser
 
 func start(t *testing.T, b priv.Backend, clients []Client) (*pki, string) {
 	t.Helper()
-	p := newPKI(t, "tf-prod", "reader", "admin", "netops", "stranger")
+	p := newPKI(t, "tf-prod", "reader", "planner", "admin", "netops", "stranger")
 	_, url := startWith(t, b, clients, p.material(nil))
 	return p, url
 }

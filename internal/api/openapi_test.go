@@ -20,7 +20,7 @@ func TestOpenAPICoversRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	var routes []string
-	for _, m := range regexp.MustCompile(`route\("([A-Z]+) (/v1/[^"]+)"`).FindAllStringSubmatch(string(src), -1) {
+	for _, m := range regexp.MustCompile(`(?:route|check)\("([A-Z]+) (/v1/[^"]+)"`).FindAllStringSubmatch(string(src), -1) {
 		routes = append(routes, strings.ToLower(m[1])+" "+m[2])
 	}
 	var ops []string

@@ -23,7 +23,8 @@ Design and the pf behaviour it relies on: [docs/DESIGN.md](docs/DESIGN.md).
   `confirm_timeout`; a restart also reverts an unconfirmed change.
 * **mTLS** (TLS 1.3) with per-client anchor and table scopes. A client is
   identified by certificate CN or SPIFFE ID, bound to its CA bundle. QoS is
-  a separate `qos` grant.
+  a separate `qos` grant. A `read_only` client can read and validate
+  (`terraform plan`), never write.
 * **QoS can only classify.** Its rules are `match` rules (no pass, block or
   NAT), and `set queue` is refused in normal anchors.
 

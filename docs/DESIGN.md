@@ -131,7 +131,11 @@ field would become a rule.
 * A client is identified by certificate CN or SPIFFE ID, always bound to the
   CA bundle it was issued from.
 * Scopes per client: anchors (exact or `prefix*`), tables, `qos`, `read_only`,
-  `admin`.
+  `admin`. A `read_only` client may GET, and may also call the two validate
+  endpoints (`POST /v1/anchors/{name}/validate`, `POST /v1/qos/validate`):
+  they only render and run `pfctl -n`. That lets a plan-only identity, such
+  as merge-request pipelines, run `terraform plan` without being able to
+  change anything. Anchor scope and the `qos` grant still apply.
 * Listen on the management address only, and let the base ruleset allow the
   port from the admin networks only.
 * 1 MiB request limit, unknown JSON fields rejected, a token bucket per client,
