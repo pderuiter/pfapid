@@ -12,6 +12,7 @@ import (
 var pol = model.Policy{
 	Interfaces: []string{"frontend", "backend"},
 	Tables:     []string{"k8s_nodes"},
+	RefTables:  []string{"rfc1918"},
 }
 
 func p(s string) netip.Prefix   { return netip.MustParsePrefix(s) }
@@ -45,6 +46,22 @@ func TestRuleGolden(t *testing.T) {
 			To:   model.Endpoint{Ports: []model.PortRange{{From: 1024, To: 65535}}},
 			Prio: &model.Prio{Normal: 2, Low: u8(6)}, Label: "ssh-in"},
 			`pass in on backend inet proto tcp from any to any port 1024:65535 set prio (2, 6) label "ssh-in"`},
+		// Negation, self and icmp-type: the pf.conf(5) forms wbyc-fw01's base
+		// ruleset uses today (pass in on $vm_ifs ... to !<rfc1918>, to self
+		// icmp-type echoreq).
+		{model.Rule{Action: model.Pass, Direction: model.In, Interface: "frontend", Family: model.Inet,
+			From: model.Endpoint{Table: "k8s_nodes"}, To: model.Endpoint{Negate: true, Table: "rfc1918"}},
+			"pass in on frontend inet from <k8s_nodes> to ! <rfc1918>"},
+		{model.Rule{Action: model.Pass, Direction: model.In, Interface: "frontend", Family: model.Inet, Protocol: model.ICMP,
+			From: model.Endpoint{Table: "k8s_nodes"}, To: model.Endpoint{Self: true}, ICMPTypes: []string{"echoreq"}},
+			"pass in on frontend inet proto icmp from <k8s_nodes> to self icmp-type echoreq"},
+		{model.Rule{Action: model.Pass, Direction: model.In, Interface: "backend", Family: model.Inet6, Protocol: model.ICMP6,
+			From: model.Endpoint{Negate: true, Prefixes: []netip.Prefix{p("fd00::/8")}}, To: model.Endpoint{Negate: true, Interface: "backend"},
+			ICMPTypes: []string{"echoreq", "128"}, Label: "ping6"},
+			`pass in on backend inet6 proto icmp6 from ! fd00::/8 to ! (backend) icmp6-type { echoreq 128 } label "ping6"`},
+		{model.Rule{Action: model.Block, Direction: model.In, Quick: true, Interface: "backend", Family: model.Inet, Protocol: model.TCP,
+			From: model.Endpoint{Negate: true, Self: true}, To: model.Endpoint{Self: true, Ports: []model.PortRange{{From: 22}}}},
+			"block in quick on backend inet proto tcp from ! self to self port 22"},
 	}
 	for _, c := range cases {
 		if err := c.r.Validate(pol); err != nil {
@@ -92,11 +109,14 @@ func FuzzAnchor(f *testing.F) {
 		`{"name":"a","rules":[{"action":"match","direction":"out","interface":"frontend","family":"inet6","from":{"prefixes":["fd00::/8"]},"to":{},"nat":{"kind":"nat-to","interface":"frontend"}}]}`,
 		`{"name":"a\nb","rules":[]}`,
 		`{"name":"a","rules":[{"action":"pass","interface":"front\nend","family":"inet","from":{},"to":{}}]}`,
+		`{"name":"a","rules":[{"action":"pass","direction":"in","interface":"frontend","family":"inet","from":{"table":"k8s_nodes"},"to":{"negate":true,"table":"rfc1918"}}]}`,
+		`{"name":"a","rules":[{"action":"pass","interface":"frontend","family":"inet","protocol":"icmp","from":{},"to":{"self":true},"icmp_types":["echoreq","3"]}]}`,
+		`{"name":"a","rules":[{"action":"pass","interface":"frontend","family":"inet","protocol":"icmp","from":{},"to":{},"icmp_types":["echoreq\npass all"]}]}`,
 	}
 	for _, s := range seeds {
 		f.Add([]byte(s))
 	}
-	fuzzPol := model.Policy{Interfaces: []string{"frontend", "backend"}, Tables: []string{"k8s_nodes"}}
+	fuzzPol := model.Policy{Interfaces: []string{"frontend", "backend"}, Tables: []string{"k8s_nodes"}, RefTables: []string{"rfc1918"}}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var a model.Anchor
 		if json.Unmarshal(data, &a) != nil {

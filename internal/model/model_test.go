@@ -10,6 +10,7 @@ import (
 var pol = Policy{
 	Interfaces:   []string{"frontend", "backend", "vlan910"},
 	Tables:       []string{"k8s_nodes"},
+	RefTables:    []string{"rfc1918"},
 	InternalNets: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("192.168.2.0/24"), netip.MustParsePrefix("fd00::/8")},
 }
 
@@ -34,7 +35,36 @@ func TestRuleValidate(t *testing.T) {
 		{"v6 prefix in inet rule", func(r *Rule) { r.From.Prefixes = pfx("2001:db8::/32") }, "is not inet"},
 		{"host bits", func(r *Rule) { r.From.Prefixes = pfx("10.1.2.3/8") }, "host bits"},
 		{"4in6", func(r *Rule) { r.Family = Inet6; r.From.Prefixes = pfx("::ffff:10.0.0.0/104") }, "IPv4-mapped"},
-		{"unknown table", func(r *Rule) { r.To.Table = "nope" }, "not a managed table"},
+		{"unknown table", func(r *Rule) { r.To.Table = "nope" }, "not a managed or referenced table"},
+		{"referenced table", func(r *Rule) { r.To = Endpoint{Table: "rfc1918"} }, ""},
+		{"negated table", func(r *Rule) { r.To.Negate = true }, ""},
+		{"negated ref table", func(r *Rule) { r.Protocol = AnyProto; r.To = Endpoint{Negate: true, Table: "rfc1918"} }, ""},
+		{"negated prefix", func(r *Rule) { r.From = Endpoint{Negate: true, Prefixes: pfx("10.0.0.0/8")} }, ""},
+		{"negated interface", func(r *Rule) { r.From = Endpoint{Negate: true, Interface: "backend"} }, ""},
+		{"negated prefix list", func(r *Rule) {
+			r.From = Endpoint{Negate: true, Prefixes: append(pfx("10.0.0.0/8"), pfx("192.168.0.0/16")...)}
+		}, "exactly one prefix"},
+		{"negated any", func(r *Rule) { r.From = Endpoint{Negate: true} }, "negate needs an address"},
+		{"negated ports only", func(r *Rule) { r.To = Endpoint{Negate: true, Ports: []PortRange{{From: 443}}} }, "negate needs an address"},
+		{"self", func(r *Rule) { r.To = Endpoint{Self: true, Ports: []PortRange{{From: 22}}} }, ""},
+		{"negated self", func(r *Rule) { r.From = Endpoint{Negate: true, Self: true} }, ""},
+		{"self and table", func(r *Rule) { r.To.Self = true }, "only one"},
+		{"icmp echoreq", func(r *Rule) {
+			r.Protocol = ICMP
+			r.To = Endpoint{Self: true}
+			r.ICMPTypes = []string{"echoreq"}
+		}, ""},
+		{"icmp type number", func(r *Rule) { r.Protocol = ICMP; r.To = Endpoint{}; r.ICMPTypes = []string{"8", "unreach"} }, ""},
+		{"icmp type 256", func(r *Rule) { r.Protocol = ICMP; r.To = Endpoint{}; r.ICMPTypes = []string{"256"} }, "number 0..255"},
+		{"icmp type leading zero", func(r *Rule) { r.Protocol = ICMP; r.To = Endpoint{}; r.ICMPTypes = []string{"08"} }, "number 0..255"},
+		{"icmp6 name in icmp", func(r *Rule) { r.Protocol = ICMP; r.To = Endpoint{}; r.ICMPTypes = []string{"neighbrsol"} }, "not an icmp type"},
+		{"icmp6 types", func(r *Rule) {
+			r.Family, r.Protocol, r.To = Inet6, ICMP6, Endpoint{}
+			r.ICMPTypes = []string{"echoreq", "neighbrsol"}
+		}, ""},
+		{"icmp type injection", func(r *Rule) { r.Protocol = ICMP; r.To = Endpoint{}; r.ICMPTypes = []string{"echoreq }"} }, "icmp_types"},
+		{"icmp type duplicate", func(r *Rule) { r.Protocol = ICMP; r.To = Endpoint{}; r.ICMPTypes = []string{"echoreq", "echoreq"} }, "duplicate"},
+		{"icmp types on tcp", func(r *Rule) { r.ICMPTypes = []string{"echoreq"} }, "need protocol icmp"},
 		{"ports without tcp/udp", func(r *Rule) { r.Protocol = AnyProto }, "ports need"},
 		{"port 0", func(r *Rule) { r.To.Ports = []PortRange{{From: 0}} }, "port 0"},
 		{"descending range", func(r *Rule) { r.To.Ports = []PortRange{{From: 100, To: 50}} }, "ascending"},
@@ -109,6 +139,23 @@ func TestNATValidate(t *testing.T) {
 	}
 }
 
+// A negated internal prefix is "everything else", not internal: NAT towards
+// it must not be refused as internal-to-internal.
+func TestNegatedPrefixIsNotInternal(t *testing.T) {
+	r := Rule{Action: Match, Direction: Out, Interface: "frontend", Family: Inet,
+		From: Endpoint{Prefixes: pfx("10.70.1.0/24")}, To: Endpoint{Negate: true, Prefixes: pfx("10.0.0.0/8")},
+		NAT: &NAT{Kind: NATTo, Interface: "frontend"}}
+	if err := r.Validate(pol); err != nil {
+		t.Fatal(err)
+	}
+	r.From.Negate = true
+	r.NAT = &NAT{Kind: BinatTo, Address: ptr(netip.MustParsePrefix("203.0.113.0/24"))}
+	r.From.Prefixes = pfx("10.70.1.0/24")
+	if err := r.Validate(pol); err == nil || !strings.Contains(err.Error(), "binat-to") {
+		t.Fatalf("negated binat source accepted: %v", err)
+	}
+}
+
 func TestAllowInternalNAT(t *testing.T) {
 	r := Rule{Action: Match, Direction: Out, Interface: "frontend", Family: Inet,
 		From: Endpoint{Prefixes: pfx("10.70.1.0/24")}, To: Endpoint{Prefixes: pfx("10.69.0.0/16")},
@@ -143,6 +190,9 @@ func TestAnchorAndTable(t *testing.T) {
 	if err := (Table{Name: "other"}).Validate(pol); err == nil {
 		t.Fatal("unmanaged table accepted")
 	}
+	if err := (Table{Name: "rfc1918"}).Validate(pol); err == nil {
+		t.Fatal("referenced (base-owned) table accepted as managed")
+	}
 }
 
 func TestPolicyValidate(t *testing.T) {
@@ -151,5 +201,11 @@ func TestPolicyValidate(t *testing.T) {
 	}
 	if err := pol.Validate(); err != nil {
 		t.Fatal(err)
+	}
+	if err := (Policy{Tables: []string{"x"}, RefTables: []string{"x"}}).Validate(); err == nil {
+		t.Fatal("table both managed and referenced accepted")
+	}
+	if err := (Policy{RefTables: []string{"Bad"}}).Validate(); err == nil {
+		t.Fatal("bad ref table name accepted")
 	}
 }
