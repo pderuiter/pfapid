@@ -109,6 +109,22 @@ func nat(n model.NAT) string {
 // Rule renders one validated rule as a single line (no newline).
 func Rule(r model.Rule) string {
 	var b strings.Builder
+	ruleHead(&b, r)
+	b.WriteString(" from " + endpoint(r.From))
+	b.WriteString(" to " + endpoint(r.To))
+	if len(r.ICMPTypes) > 0 {
+		b.WriteString(icmpTypes(r))
+	}
+	if r.NAT != nil {
+		b.WriteString(nat(*r.NAT))
+	}
+	ruleOptions(&b, r)
+	return b.String()
+}
+
+// ruleHead writes the action, direction, log/quick flags, interface, address
+// family and protocol: everything before `from`.
+func ruleHead(b *strings.Builder, r model.Rule) {
 	b.WriteString(string(r.Action))
 	if r.BlockReturn {
 		b.WriteString(" return")
@@ -127,24 +143,20 @@ func Rule(r model.Rule) string {
 	if r.Protocol != model.AnyProto {
 		b.WriteString(" proto " + string(r.Protocol))
 	}
-	b.WriteString(" from " + endpoint(r.From))
-	b.WriteString(" to " + endpoint(r.To))
-	if len(r.ICMPTypes) > 0 {
-		b.WriteString(icmpTypes(r))
-	}
-	if r.NAT != nil {
-		b.WriteString(nat(*r.NAT))
-	}
+}
+
+// ruleOptions writes the trailing options: set prio, set queue and label.
+func ruleOptions(b *strings.Builder, r model.Rule) {
 	if r.Prio != nil {
 		if r.Prio.Low != nil {
-			fmt.Fprintf(&b, " set prio (%d, %d)", r.Prio.Normal, *r.Prio.Low)
+			fmt.Fprintf(b, " set prio (%d, %d)", r.Prio.Normal, *r.Prio.Low)
 		} else {
-			fmt.Fprintf(&b, " set prio %d", r.Prio.Normal)
+			fmt.Fprintf(b, " set prio %d", r.Prio.Normal)
 		}
 	}
 	if r.Queue != nil {
 		if r.Queue.Priority != "" {
-			fmt.Fprintf(&b, " set queue (%s, %s)", r.Queue.Name, r.Queue.Priority)
+			fmt.Fprintf(b, " set queue (%s, %s)", r.Queue.Name, r.Queue.Priority)
 		} else {
 			b.WriteString(" set queue " + r.Queue.Name)
 		}
@@ -152,7 +164,6 @@ func Rule(r model.Rule) string {
 	if r.Label != "" {
 		b.WriteString(` label "` + r.Label + `"`)
 	}
-	return b.String()
 }
 
 // Anchor renders the file loaded into api/<name>. It returns ErrGuard if the
